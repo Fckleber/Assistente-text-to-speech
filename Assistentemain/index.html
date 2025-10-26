@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Assistente de texto| Text-to-Speech</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Define a fonte Inter e fallback */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fc;
+        }
+        /* Estilos básicos para o container principal */
+        .tts-container {
+            max-width: 800px;
+            width: 95%;
+            margin-top: 2rem;
+            margin-bottom: 2rem;
+            padding: 1.5rem;
+        }
+        /* Garante que o display de destaque e o textarea tenham a mesma aparência e altura */
+        .text-area-style {
+            transition: all 0.15s ease-in-out;
+            min-height: 150px;
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen">
+
+    <div class="tts-container rounded-xl bg-white shadow-xl">
+        <h1 class="text-3xl font-extrabold text-gray-900 mb-2">Assistente de texto</h1>
+        <!-- Área de Input de Texto (visível para edição) -->
+        <textarea
+            id="textInput"
+            class="w-full p-4 border-2 border-indigo-200 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 resize-y text-area-style"
+            placeholder="Exemplo: 'Naquela noite escura e tempestuosa, o velho farol acendeu sua luz pela milésima vez, guiando os navios perdidos para a segurança...'"
+            maxlength="15000"
+        ></textarea>
+        
+        <!-- Container para exibir o texto com destaque durante a narração (read-only) -->
+        <div 
+            id="highlightedDisplay" 
+            class="w-full p-4 border-2 border-indigo-200 rounded-lg overflow-y-auto text-gray-800 text-area-style hidden" 
+            style="white-space: pre-wrap;"
+        ></div>
+        
+        <p class="text-sm text-gray-500 mt-1 text-right" id="charCount">0/15000 caracteres</p>
+
+        <!-- Botão de Ação -->
+        <button
+            id="speakButton"
+            class="w-full mt-4 py-3 px-6 bg-indigo-600 text-white font-bold text-lg rounded-xl hover:bg-indigo-700 transition duration-200 ease-in-out focus:outline-none focus:ring-4 focus:ring-indigo-500 focus:ring-opacity-50 disabled:bg-indigo-400 flex items-center justify-center"
+            onclick="generateSpeech()"
+        >
+            <span id="buttonText">Falar Texto</span>
+            <svg id="loadingSpinner" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+        </button>
+
+        <!-- Área de Status e Mensagens -->
+        <div id="statusMessage" class="mt-4 p-3 rounded-lg text-sm hidden" role="alert"></div>
+
+        <p class="text-xs text-gray-500 mt-6 text-center">
+            O áudio é gerado em tempo real.
+        </p>
+    </div>
+
+    <script>
+        // --- Variáveis Globais (Limpa para execução local) ---
+
+        // Referências DOM
+        const textInput = document.getElementById('textInput');
+        const speakButton = document.getElementById('speakButton');
+        const buttonText = document.getElementById('buttonText');
+        const loadingSpinner = document.getElementById('loadingSpinner');
+        const statusMessage = document.getElementById('statusMessage');
+        const charCount = document.getElementById('charCount');
+        const highlightedDisplay = document.getElementById('highlightedDisplay'); 
+        
+        // URL base da API TTS do Google Tradutor (não oficial, não requer chave)
+        const GOOGLE_TTS_URL = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=pt&ttsspeed=1&q=';
+        
+        // Limite de chunk ajustado para a segurança da API do Google Tradutor
+        const MAX_CHUNK_SIZE = 200; 
+
+        // Atualiza a contagem de caracteres
+        textInput.addEventListener('input', () => {
+            const currentLength = textInput.value.length;
+            charCount.textContent = `${currentLength}/15000 caracteres`;
+        });
+        
+        // Sincroniza a altura das áreas de display
+        const syncHeight = () => {
+             const height = textInput.offsetHeight;
+             highlightedDisplay.style.height = height > 150 ? height + 'px' : '150px';
+        };
+        textInput.addEventListener('change', syncHeight);
+        textInput.addEventListener('keyup', syncHeight);
+        textInput.addEventListener('focus', syncHeight);
+        window.addEventListener('resize', syncHeight);
+
+        // --- Funções Utilitárias ---
+
+        /**
+         * Cria um URL de objeto e toca o áudio (simplesmente usando a URL do TTS).
+         * @param {string} audioUrl - A URL do arquivo .mp3 gerado pelo Google.
+         * @returns {Promise<void>} Uma promessa que resolve quando o áudio termina.
+         */
+        function playAudio(audioUrl) {
+            return new Promise((resolve) => {
+                const audio = new Audio(audioUrl);
+                audio.play();
+                audio.onended = () => {
+                    resolve(); 
+                };
+                audio.onerror = (e) => {
+                    console.error("Erro na reprodução de áudio:", e);
+                    resolve(); // Resolve para continuar a fila mesmo com erro
+                };
+            });
+        }
+
+        // Função para dividir o texto em 200 caracteres
+
+        function chunkText(text, maxLen) {
+            const finalChunks = [];
+            let start = 0;
+
+            while (start < text.length) {
+                let end = Math.min(start + maxLen, text.length);
+                let chunkAttempt = text.substring(start, end);
+                let splitIndex = end;
+
+                if (end < text.length) {
+                    let lastSpace = chunkAttempt.lastIndexOf(' ');
+                    
+                    if (lastSpace !== -1) {
+                        splitIndex = start + lastSpace + 1; 
+                    } else {
+                        splitIndex = end;
+                    }
+                }
+                
+                const chunk = text.substring(start, splitIndex);
+                finalChunks.push(chunk);
+                start = splitIndex;
+                
+                // Pula espaços em branco/quebras de linha no início do próximo chunk
+                while (start < text.length && /\s/.test(text[start])) {
+                    start++;
+                }
+            }
+            
+            // Filtrar chunks vazios
+            return finalChunks.filter(chunk => chunk.trim().length > 0);
+        }
+
+        //Função Principal de Geração de Fala (Lógica com Google Tradutor)
+
+        function updateStatus(message, isError = false) {
+            statusMessage.textContent = message;
+            statusMessage.classList.remove('hidden', 'bg-red-100', 'text-red-700', 'bg-green-100', 'text-green-700', 'bg-blue-100', 'text-blue-700');
+            if (isError) {
+                statusMessage.classList.add('bg-red-100', 'text-red-700');
+            } else if (message.includes("Sucesso") || message.includes("concluída")) {
+                statusMessage.classList.add('bg-green-100', 'text-green-700');
+            } else {
+                statusMessage.classList.add('bg-blue-100', 'text-blue-700');
+            }
+        }
+
+        async function generateSpeech() {
+            const userText = textInput.value; // Texto completo
+            if (!userText.trim()) {
+                updateStatus("Por favor, digite um texto para narrar.", true);
+                return;
+            }
+
+            //Lógica de Seleção
+            let textToNarrate = userText.trim();
+            let originalStartIndex = 0;
+
+            const selectionStart = textInput.selectionStart;
+            const selectionEnd = textInput.selectionEnd;
+
+            if (selectionStart !== selectionEnd) {
+                textToNarrate = userText.substring(selectionStart, selectionEnd);
+                originalStartIndex = selectionStart;
+            }
+
+            if (!textToNarrate.trim()) {
+                updateStatus("A seleção ou texto está vazio.", true);
+                return;
+            }
+            //FIM Lógica de Seleção
+
+            const chunks = chunkText(textToNarrate, MAX_CHUNK_SIZE);
+
+            if (chunks.length === 0) {
+                updateStatus("Texto inválido após limpeza e divisão.", true);
+                return;
+            }
+
+            // UI Loading State - Prepara para Narração
+            speakButton.disabled = true;
+            textInput.classList.add('hidden'); // Oculta a área de texto original
+            highlightedDisplay.classList.remove('hidden'); // Mostra a área de destaque
+            highlightedDisplay.textContent = userText; // Inicializa com o texto completo
+            
+            buttonText.textContent = "Narração em Andamento...";
+            loadingSpinner.classList.remove('hidden');
+            statusMessage.classList.add('hidden'); // Oculta mensagens anteriores
+
+            let currentOffsetInNarratedText = 0; // Rastreador de índice DENTRO do textToNarrate
+
+            try {
+                updateStatus(`Texto dividido em ${chunks.length} partes de até ${MAX_CHUNK_SIZE} caracteres. Iniciando narração sequencial...`, false);
+
+                for (let i = 0; i < chunks.length; i++) {
+                    const chunk = chunks[i];
+                    
+                    // 1. Destaque do texto no display
+                    const chunkStartInFullText = originalStartIndex + currentOffsetInNarratedText;
+                    const chunkEndInFullText = chunkStartInFullText + chunk.length;
+
+                    if (chunkStartInFullText >= userText.length) break;
+
+                    const before = userText.substring(0, chunkStartInFullText);
+                    const after = userText.substring(chunkEndInFullText);
+
+                    // Cria o HTML com destaque (amarelo claro e negrito)
+                    highlightedDisplay.innerHTML = 
+                        `<span>${before}</span>` +
+                        `<span id="currentChunk" class="bg-yellow-200 font-bold p-0.5 rounded">${chunk}</span>` +
+                        `<span>${after}</span>`;
+                    
+                    const currentChunkElement = document.getElementById('currentChunk');
+                    if (currentChunkElement) {
+                        currentChunkElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                    
+                    // 2. Atualiza o status
+                    updateStatus(`Falando parte ${i + 1} de ${chunks.length}: "${chunk.substring(0, 30)}..."`, false);
+                    
+                    // 3. Geração da URL e Reprodução de Áudio
+                    
+                    // Codifica o texto para ser seguro na URL
+                    const encodedChunk = encodeURIComponent(chunk.trim()); 
+                    
+                    // Constrói a URL final
+                    const audioUrl = GOOGLE_TTS_URL + encodedChunk;
+
+                    // Espera a reprodução do áudio atual terminar antes de ir para o próximo chunk
+                    await playAudio(audioUrl);
+                    
+                    // Avança o índice para o início do próximo chunk DENTRO do textToNarrate
+                    currentOffsetInNarratedText += chunk.length;
+                }
+                
+                // Limpa o destaque final e mostra o texto completo sem destaque
+                highlightedDisplay.innerHTML = userText;
+                
+                updateStatus("Narração concluída com Sucesso!", false);
+
+            } catch (error) {
+                console.error("Erro durante a geração de fala:", error);
+                updateStatus(`Erro fatal durante o processamento: ${error.message}.`, true);
+            } finally {
+                // UI Reset State
+                speakButton.disabled = false;
+                textInput.classList.remove('hidden'); // Mostra a área de texto original
+                highlightedDisplay.classList.add('hidden'); // Oculta a área de destaque
+                buttonText.textContent = "Falar Texto";
+                loadingSpinner.classList.add('hidden');
+            }
+        }
+
+        // Inicializa a contagem de caracteres e altura ao carregar
+        window.onload = () => {
+             const currentLength = textInput.value.length;
+             charCount.textContent = `${currentLength}/15000 caracteres`;
+             syncHeight();
+             highlightedDisplay.textContent = textInput.value;
+        };
+    </script>
+</body>
+</html>
